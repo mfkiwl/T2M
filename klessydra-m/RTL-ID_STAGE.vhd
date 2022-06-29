@@ -96,7 +96,6 @@ entity ID_STAGE is
     instr_word_FETCH           : in  std_logic_vector(31 downto 0);
     spm_rs1                    : out std_logic;
     spm_rs2                    : out std_logic;
-    harc_sleep_wire            : in  std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
     harc_sleep                 : in  std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
     CORE_STATE                 : in  std_logic_vector(THREAD_POOL_BASELINE downto 0);
     CORE_STATE_FETCH           : in  std_logic_vector(THREAD_POOL_BASELINE downto 0);
@@ -604,32 +603,16 @@ begin
               when CSRRW =>
                 decoded_instruction_IE <= CSRRW_pattern;
               when CSRRS =>
-                if zero_rd_wire = '0' then
-                  decoded_instruction_IE <= CSRRS_pattern;
-                else                    -- R0_INSTRUCTION\
-                  decoded_instruction_IE <= NOP_pattern;
-                end if;
+                decoded_instruction_IE <= CSRRS_pattern;
               when CSRRC =>
-                if zero_rd_wire = '0' then
-                  decoded_instruction_IE <= CSRRC_pattern;
-                else                    -- R0_INSTRUCTION\
-                  decoded_instruction_IE <= NOP_pattern;
-                end if;
+                decoded_instruction_IE <= CSRRC_pattern;
               when CSRRWI =>
                 decoded_instruction_IE <= CSRRWI_pattern;
               when CSRRSI =>
-                if zero_rd_wire = '0' then
-                  decoded_instruction_IE <= CSRRSI_pattern;
-                else                    -- R0_INSTRUCTION
-                  decoded_instruction_IE <= NOP_pattern; -- AAA highly likely not to be a NOP
-                end if;
+                decoded_instruction_IE <= CSRRSI_pattern;
               when CSRRCI =>
-                if zero_rd_wire = '0' then
-                  decoded_instruction_IE <= CSRRCI_pattern;
-                else                    -- R0_INSTRUCTION
-                  decoded_instruction_IE <= NOP_pattern;
-                end if;
-              when others =>  -- ILLEGAL_INSTRUCTION                      
+                decoded_instruction_IE <= CSRRCI_pattern;
+              when others =>  -- ILLEGAL_INSTRUCTION
                 decoded_instruction_IE <= ILL_pattern;
             end case;  -- FUNCT3_wires cases
 
@@ -811,7 +794,7 @@ begin
        flush_hart_ID(harc_ID) = '0' and
        flush_decode(harc_ID)  = '0' and
        served_irq(harc_ID)    = '0' and
-       CORE_STATE(IMT_MODE) = '0' then
+       CORE_STATE(IMT_MODE)   = '0' then
       case OPCODE_wires is
 
         when JAL =>         -- JAL instruction
