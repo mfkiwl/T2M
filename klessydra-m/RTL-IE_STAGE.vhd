@@ -34,7 +34,7 @@ entity IE_STAGE is
     RV32M                     : natural;
     HET_CLUSTER_S1_CORE       : natural;
     TPS_CEIL                  : natural;
-    --TPS_GLBL_CEIL             : natural;
+    --TPS_GLBL_CEIL           : natural;
     RF_CEIL                   : natural
   );
   port (
@@ -108,7 +108,6 @@ entity IE_STAGE is
     served_pending_irq        : out std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
     ebreak_instr              : out std_logic;
     absolute_jump             : out std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
-    instr_rvalid_WB           : out std_logic;
     instr_word_IE_WB          : out std_logic_vector (31 downto 0);
     IE_WB_EN                  : out std_logic;
     IE_WB_EN_wire             : out std_logic;
@@ -126,6 +125,7 @@ entity IE_STAGE is
     IE_flush_hart_ID          : out std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
     halt_update_IE            : out std_logic_vector(THREAD_POOL_SIZE-1 downto 0);
     branch_taken              : out std_logic;
+    branch_hit                : out std_logic;
     branch_predict_taken_IE   : in  std_logic
   );
 end entity;  ------------------------------------------
@@ -190,6 +190,8 @@ architecture EXECUTE of IE_STAGE is
   signal sub                        : std_logic_vector(32 downto 0);
   signal res_wire, res              : std_logic_vector(63 downto 0);
   signal div_count_wire, div_count  : unsigned(5 downto 0);
+  signal div_enable                 : std_logic;
+  signal div_finished               : std_logic;
 
   signal Immediate                  : std_logic_vector(31 downto 0);
   signal absolute_address_int       : std_logic_vector(31 downto 0);
@@ -217,6 +219,23 @@ architecture EXECUTE of IE_STAGE is
   signal clock_cycle         : std_logic_vector(63 downto 0);  -- RDCYCLE
   signal external_counter    : std_logic_vector(63 downto 0);  -- RDTIME
   --signal instruction_counter : std_logic_vector(63 downto 0);  -- RDINSTRET
+
+  component divider is
+    generic (
+      divider_implementation : natural := 5;
+      size                   : natural := 32
+    );
+    Port (
+      reset                 : in  std_logic;
+      clk                   : in  std_logic;
+      dividend_i            : in  std_logic_vector(size-1 downto 0);
+      divisor_i             : in  std_logic_vector(size-1 downto 0);
+      div_enable            : in  std_logic;
+      div_finished          : out std_logic;
+      result_div            : out std_logic_vector(size-1 downto 0); -- Decomment if you want to see the result
+      result_rem            : out std_logic_vector(size-1 downto 0) -- Decomment if you want to see the result
+    );
+  end component;
 
   function rs1 (signal instr : in std_logic_vector(31 downto 0)) return integer is
   begin
@@ -247,6 +266,25 @@ architecture EXECUTE of IE_STAGE is
   end function add_vect_bits;
 
 begin
+
+  divider_inst : divider
+    generic map(
+      divider_implementation => 5,
+      size                   => 32
+    )
+    port map(
+      clk                    => clk_i,
+      reset                  => not rst_ni,
+      dividend_i             => RS1_Data_IE_int,
+      divisor_i              => RS2_Data_IE_int,
+      div_enable             => div_enable,  
+      div_finished           => div_finished,
+      --result_div             => open,
+      --result_rem             => open
+      result_div             => res(31 downto 0),
+      result_rem             => res(63 downto 32)
+    );
+
 
   T13_switch <= '1'                                     when
                 context_switch                =  1      and
@@ -290,6 +328,9 @@ begin
       halt_update_IE         <= (others => '0');
       halt_update_IE_pending <= (others => '0');
     elsif rising_edge(clk_i) then
+      if THREAD_POOL_SIZE /= 1 then
+        S1_switch_routine <= '0';
+      end if;
       IE_WB_EN         <= '0';
       MUL_WB_EN        <= '0';
       WB_EN_next_IE    <= '0';
@@ -482,15 +523,6 @@ begin
                 end if;
               end if;
 
-              if decoded_instruction_IE(DIVU_bit_position) = '1' or
-                 decoded_instruction_IE(DIV_bit_position)  = '1' or
-                 decoded_instruction_IE(REMU_bit_position) = '1' or
-                 decoded_instruction_IE(REM_bit_position)  = '1' then
-                if div_count_wire(5) = '1' or div_bypass_en = '1' then
-                  WB_EN_next_IE <= '1';
-                end if;
-              end if;
-
 
               if decoded_instruction_IE(DIVU_bit_position) = '1' then
                 if zero_rs2 = '1' then
@@ -624,6 +656,7 @@ begin
     sw_irq_en                        <= (others => '1'); -- always enabled by default
     sw_irq_int                       <= (others => '0');
     absolute_jump_wires              := (others => '0');
+    div_enable                       <= '0';
     core_busy_IE_wires               := '0';
     IE_except_condition_wires        := '0';
     set_branch_condition_wires       := '0';
@@ -639,10 +672,11 @@ begin
     csr_instr_req                    <= '0';
     csr_op_i                         <= (others => '0');
     csr_addr_i                       <= (others => '0');
-    IE_WB_EN_wire                    <= (WB_EN_next_IE or (instr_rvalid_IE and WB_EN_next_ID  and not decoded_instruction_IE(MUL_bit_position))) and not served_irq_wires(harc_EXEC);
+    IE_WB_EN_wire                    <= (WB_EN_next_IE or div_finished or (instr_rvalid_IE and WB_EN_next_ID  and not decoded_instruction_IE(MUL_bit_position))) and not served_irq_wires(harc_EXEC);
     --branch prediction signals
     halt_update_IE_wire              <= halt_update_IE_pending and not instr_gnt_i; -- latch the halt wire as long as we don't have a valid instr
     branch_taken                     <= '0';
+    branch_hit                       <= branch_instr;
     source_hartid_o                  <= to_integer(unsigned(MHARTID(harc_EXEC)(THREAD_POOL_SIZE_GLOBAL-1 downto 0))); -- AAA change the to TPS_CEIL or TPS_GLBL_CEIL
 
     if RV32M = 1 then
@@ -660,7 +694,7 @@ begin
       MUL                            <= (others => '0');
       MUL_low                        <= (others => '0');
       div_count_wire                 <= (others => '0');
-      res_wire                       <= (others => '0');
+      --res_wire                       <= (others => '0');
       sub                            <= (others => '0');
       nextstate_mul                  <= mult;
       nextstate_mulh                 <= init;
@@ -670,7 +704,7 @@ begin
     if fetch_stage_en = 0 then
       flush_hart_int_wire <= (others => '0');
       for h in harc_range loop
-        IE_flush_hart_ID(h) <= flush_hart_int_wire(h);
+        IE_flush_hart_ID(h) <= flush_hart_int_wire(h)  or flush_hart_pending(h);
       end loop;
     elsif fetch_stage_en = 1 then
       for h in harc_range loop
@@ -791,7 +825,8 @@ begin
                 ie_taken_branch_wires      := '1';
               end if;
             else
-              if pass_BRANCH = not branch_predict_taken_IE then
+              if pass_BRANCH = not branch_predict_taken_IE then -- if branch miss
+                branch_hit <= '0';
                 flush_hart_int_wire(harc_EXEC) <= '1';
                 if fetch_stage_en = 1 then
                   if CORE_STATE_ID(DUAL_HART_MODE) = '1' then
@@ -813,7 +848,7 @@ begin
             --ie_csr_wdata_i <= RS2_Data_IE;
             --csr_addr_i     <= MIP_ADDR;
             --source_hartid_o <= harc_EXEC;
-            --csr_op_i <= CSRRW;
+            --csr_op_i <= CSRRW; 0x0000FF00
             if data_addr_internal_IE(31 downto 9) = x"0000F" & "111" then
               if halt_IE = '0' then
                 if HET_CLUSTER_S1_CORE = 1 then -- if the current core is the S1 core in the Het. cluster
@@ -979,10 +1014,9 @@ begin
               case state_div is
                 when init =>
                   if RS1_Data_IE(31) = '0' or signed_op = '0' then
-                    res_wire <= (31 downto 0 => '0') & RS1_Data_IE;
+                    RS1_Data_IE_int_wire <= RS1_Data_IE;
                   else
                     RS1_Data_IE_int_wire <= std_logic_vector(signed(not(RS1_Data_IE)) + 1);
-                    res_wire <= (31 downto 0 => '0') & RS1_Data_IE_int_wire;
                   end if;
                   if RS2_Data_IE(31) = '0' or signed_op = '0' then
                     RS2_Data_IE_int_wire <= RS2_Data_IE;
@@ -992,17 +1026,19 @@ begin
                   nextstate_div <= divide;
                   core_busy_IE_wires := '1';
                 when divide =>
-                  if div_count(5) /= '1' then
-                    div_count_wire <= div_count + 1;
+                  div_enable <= '1';
+                  core_busy_IE_wires := not div_finished;
+                  if core_busy_IE_wires then
+                    --div_count_wire <= div_count + 1;
                     nextstate_div <= divide;
-                    core_busy_IE_wires := '1';
+                    --core_busy_IE_wires := '1';
                   end if;
-                  if sub(32) = '1' then -- RS2_Data_IE is the divisor
-                    res_wire <= res(62 downto 0) & '0';
-                  else
-                    res_wire <= sub(31 downto 0) & res(30 downto 0) & '1';
-                  end if;
-                  sub <= std_logic_vector(('0' & unsigned(res(62 downto 31))) - ('0' & unsigned(RS2_Data_IE_int)));
+                  --if sub(32) = '1' then -- RS2_Data_IE is the divisor
+                  --  res_wire <= res(62 downto 0) & '0';
+                  --else
+                  --  res_wire <= sub(31 downto 0) & res(30 downto 0) & '1';
+                  --end if;
+                  --sub <= std_logic_vector(('0' & unsigned(res(62 downto 31))) - ('0' & unsigned(RS2_Data_IE_int)));
               end case; 
             end if;
 
@@ -1082,7 +1118,7 @@ begin
         state_mul            <= nextstate_mul;
         state_div            <= nextstate_div;
         div_count            <= div_count_wire;
-        res                  <= res_wire;
+        --res                  <= res_wire;
         RS1_Data_IE_int      <= RS1_Data_IE_int_wire;  -- used by the divider as well
         RS2_Data_IE_int      <= RS2_Data_IE_int_wire;  -- used by the divider as well
         --partial_mul_b        <= partial_mul_b_wire;
